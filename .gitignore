@@ -1,0 +1,10 @@
+build/
+install/
+log/
+.venv/
+__pycache__/
+*.py[cod]
+*.swp
+*.swo
+.vscode/
+.idea/
