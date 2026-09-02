@@ -456,3 +456,139 @@ git status
 ## License
 
 Choose and declare a license before distributing the project. The examples above use Apache-2.0 metadata as a placeholder; replace the maintainer email and license declaration if your project uses different terms.
+
+
+# Appendix A — Detailed explanations from the live-coding script
+
+## A.1 Why the terminal comes first
+
+ROS 2 tutorials often fail beginners before robotics even starts because the shell command is entered in the wrong directory, the environment was not sourced, or a multiline command was split incorrectly. The safest habit is to make the current directory visible with `pwd`, inspect the expected files with `ls -la`, and run one small verification command after each structural change.
+
+`mkdir -p` means “make directories and create missing parents.” It is deliberately idempotent: running it again does not fail merely because the directory already exists. `cd` changes the current shell directory, while `source` executes a setup script in the current shell so that variables such as `AMENT_PREFIX_PATH`, `COLCON_PREFIX_PATH`, and `ROS_DISTRO` remain available to subsequent commands. The space in `source /opt/ros/humble/setup.bash` is mandatory because `source` is the command and the path is its argument.
+
+Command chaining has a safety consequence. `command_a && command_b` runs the second command only when the first succeeds. This is useful for sequences such as `cd ~/dog_factory_ws && colcon build`, because it avoids building from an unintended directory. Separate lines are easier to read while teaching, but `&&` is preferable when a later command would be dangerous if an earlier command failed.
+
+The expression `$(...)` is Bash command substitution. For example, `$(ros2 pkg prefix dog_factory_environment)` asks ROS 2 for the installed package directory and inserts the result into the surrounding command. This avoids hard-coded paths that would break for another user or another workspace location.
+
+A heredoc writes multiple lines without opening an editor. The closing marker must appear alone on its own line, with no spaces before or after it:
+
+```bash
+cat > ~/dog_factory_ws/.gitignore <<'EOF'
+build/
+install/
+log/
+EOF
+```
+
+The quoted `EOF` prevents accidental expansion of variables inside the file content. This is particularly useful for `.gitignore`, YAML, and small configuration files.
+
+## A.2 How a ROS 2 workspace is organized
+
+A workspace is not itself a ROS 2 package. It is a container that normally has a `src/` directory containing one or more packages. A package is identified by `package.xml` and is built according to its declared build type. `colcon` discovers packages recursively under `src/`; placing an extra package at the workspace root can create confusing discovery errors or duplicate package names.
+
+The `build/` directory contains intermediate build state, `install/` contains installed package resources and executables, and `log/` contains build and test logs. These directories are disposable. They should be removed only from a verified workspace directory and should never be edited manually or committed to Git.
+
+The five-package architecture in this project is intentional. The description package answers “what is the robot?” The environment package answers “where is the robot?” The control package answers “how does it move?” The bringup package answers “how are all components started together?” The navigation package answers “how does it plan and follow routes?” Separating those questions makes failures easier to isolate.
+
+## A.3 `ament_cmake` and `ament_python`
+
+A pure Python ROS 2 package can use `ament_python`, which follows Python packaging conventions and is convenient for nodes written only in Python. This project uses `ament_cmake` for all packages so that the control package can contain both Python nodes and compiled C++ nodes. `ament_cmake_python` provides the Python installation helper inside an `ament_cmake` package.
+
+The outer folder `dog_factory_control/` is the ROS 2 package. The inner folder `dog_factory_control/dog_factory_control/` is the importable Python module. Confusing those two levels is a common reason for an executable to build but fail at runtime with an import error.
+
+## A.4 URDF, Xacro, and SDF are different layers
+
+URDF is an XML representation of a single robot’s kinematic tree. It describes links, joints, visual geometry, collision geometry, inertial properties, and sensor frames. A valid URDF has one root link and no disconnected second tree. Each link and joint must have a unique name.
+
+Xacro extends URDF with properties, macros, and includes. Xacro is still XML, so normal XML rules always apply. Every attribute must use `name="value"`; every opening tag must be closed; and self-closing tags must use the form `<tag .../>`. The `xmlns:xacro` declaration is required whenever `xacro:` elements appear.
+
+SDF is Gazebo’s native world and simulation format. It can describe multiple independent models, lights, physics settings, and world-level resources. The practical distinction is simple: use URDF/Xacro for the dog and SDF for the factory world.
+
+## A.5 Visual, collision, and inertial data
+
+The `visual` element controls what RViz and Gazebo render. The `collision` element controls contact calculations. A detailed mesh can be used for the visual while a simpler box or cylinder is used for collision to reduce computation. The `inertial` element contains mass and an inertia tensor. Simulation quality depends on physically plausible values; zero or missing inertia can produce unstable motion, exploding joints, or links that pass through the floor.
+
+The reusable `box_inertial` macro in this repository uses the standard rectangular-prism inertia equations. Its values are useful for an educational model, but they are not a substitute for measuring a real robot’s mass distribution. The same caution applies to joint effort, velocity, limits, and friction values.
+
+## A.6 Why macros prevent quadruped mistakes
+
+Four legs have the same logical structure but different positions and prefixes. Copying the complete XML four times makes it easy to leave one joint pointing to the wrong child, duplicate a name, or change one dimension accidentally. A Xacro macro centralizes the structure and changes only the prefix and mounting coordinates.
+
+The prefix is not cosmetic. It makes names such as `front_left_hip`, `rear_right_hip_joint`, and their descendants unique. The generated TF tree depends on those names, so a duplicate name is both an XML/URDF problem and a runtime transform problem.
+
+## A.7 Gazebo physics and the factory world
+
+The example world includes a sun, a ground plane, two static walls, and a crate. Static models are appropriate for immovable scenery and allow Gazebo to optimize collision handling. The physics block uses a one-millisecond maximum step and a target update rate of 1000 Hz. A smaller step can improve contact accuracy but increases CPU cost; a larger step may run faster but can make legged contact and joints unstable.
+
+The `real_time_factor` is a target, not a guarantee. If the computer cannot complete the physics calculations in time, Gazebo will run slower than real time. This is why a visually simple world can still become computationally expensive when high-frequency sensors and detailed collision geometry are added.
+
+## A.8 Control architecture: Python and C++ together
+
+Python is a good fit for keyboard teleoperation, state machines, and high-level orchestration because those components are easy to change and are usually not required to execute at hundreds of hertz. C++ is appropriate for high-frequency perception and control loops, large data processing, and latency-sensitive operations. Both languages communicate through ROS 2 topics, services, and actions rather than direct language coupling.
+
+A teleoperation node commonly publishes `geometry_msgs/msg/Twist` to `cmd_vel`. The linear `x` component expresses forward and backward motion, while angular `z` expresses yaw. Raw terminal input requires `termios` and `tty`; the node must restore the terminal settings in a `finally` block even when interrupted with Ctrl-C.
+
+Publishing a command is not the same as implementing a physical quadruped controller. The simulation skeleton demonstrates package boundaries and message flow. A full walking controller would need gait timing, support polygons, inverse kinematics, contact detection, joint feedback, trajectory limits, and safety behavior.
+
+## A.9 Bringup and navigation dependencies
+
+A bringup launch file is an orchestration layer. It should start the world, spawn the robot, publish the robot state, and start controllers in a deliberate order. Navigation should not be launched until the required TF frames and sensor topics exist.
+
+Frame names and topic names must be treated as an interface contract. If a lidar publishes in `lidar_link` but a navigation configuration expects `laser_frame`, the mismatch must be corrected explicitly. Use the graph to inspect reality:
+
+```bash
+ros2 topic list
+ros2 topic echo /scan --once
+ros2 topic echo /tf --once
+ros2 run tf2_tools view_frames
+```
+
+Nav2 parameters are not universal constants. They depend on the robot’s footprint, sensor frame, map resolution, planner, controller, and transform tree. Start with a minimal configuration, verify the TF and scan data, and only then tune planners and costmaps.
+
+## A.10 A disciplined debugging loop
+
+When `xacro` reports `line N, column M`, inspect that exact location in the source file rather than guessing:
+
+```bash
+nl -ba src/dog_robot_description/urdf/dog_robot_core.xacro | sed -n '1,120p'
+```
+
+Test the source directly:
+
+```bash
+xacro src/dog_robot_description/urdf/dog_robot.urdf.xacro > /tmp/dog_robot.urdf
+```
+
+If source validation succeeds but launch fails, inspect installation:
+
+```bash
+ros2 pkg prefix dog_robot_description
+find "$(ros2 pkg prefix dog_robot_description)/share/dog_robot_description" -maxdepth 3 -type f
+```
+
+If the installed file is stale, rebuild after checking that the package’s CMake file installs the relevant directory. When the package structure or package name changes, remove only the generated directories and rebuild. Never “fix” a generated file under `install/`; the next build will overwrite it.
+
+Common XML faults are visually small but exacting: `name=dog_grey"` is invalid because the opening quote is missing; `rpy"0 0 0"` is invalid because `=` is missing; `rbga` is not the URDF color attribute; and `<color rgba=".../>` is invalid because the attribute quote is not closed. The best defense is direct `xacro` validation before RViz.
+
+## A.11 Git history and remote backups
+
+Git has three relevant states: the working tree contains edits on disk, the index contains staged changes, and a commit records a permanent snapshot. `git status` is the primary inspection command. `git add` stages selected files, and `git commit -m "..."` records the staged snapshot.
+
+A `.gitignore` prevents machine-generated artifacts from entering the index, but it does not remove files that were already committed. If `build/`, `install/`, or `log/` were committed by mistake, remove them from the index with `git rm -r --cached` after confirming that the ignore rules are correct.
+
+When connecting a local repository to an existing GitHub repository, check the branch and remote before pushing:
+
+```bash
+git remote -v
+git branch --show-current
+git fetch origin
+git log --oneline --all --decorate -10
+```
+
+Never use `git push --force` as a first fix for a history mismatch. A remote repository may contain commits that are not present locally. Merge deliberately, inspect conflicts, and push only after reviewing `git status` and `git diff`.
+
+## A.12 Final teaching sequence
+
+The most reliable learning order is incremental. First create and source the workspace. Then create one package and make its XML parse. Next install the URDF folder and display a single chassis in RViz. Add the shell, head, sensors, and legs one logical unit at a time. Test the environment world separately in Gazebo. Add control nodes only after the robot and world are independently valid. Finally combine everything in bringup and begin navigation.
+
+This sequence is slower than pasting an entire project at once, but every milestone has a small failure surface. When something breaks, the last known-good milestone identifies where to look. That is the central debugging principle of the project: **change one layer, validate that layer, and only then add the next layer.**
